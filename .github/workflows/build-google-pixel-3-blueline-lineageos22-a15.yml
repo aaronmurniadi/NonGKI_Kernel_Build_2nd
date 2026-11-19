@@ -143,8 +143,9 @@ jobs:
 
           # Keep the LineageOS release string (4.9.337-g<12 chars>). Vendor kernel
           # modules must see the same vermagic, otherwise Wi-Fi and other drivers
-          # do not load.
-          printf -- '-g%s' "$(git rev-parse --short=12 HEAD)" > .scmversion
+          # do not load. Cut HEAD to exactly 12 characters: --short=12 is only a
+          # minimum, git returns 13 characters in this repository.
+          printf -- '-g%s' "$(git rev-parse HEAD | cut -c1-12)" > .scmversion
 
           # Clang 14+ rejects the illegal IS_ERR()/NULL test in these two files.
           sed -i 's/if (!dpath) {/if (IS_ERR(dpath)) {/' fs/notify/fdinfo.c
