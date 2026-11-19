@@ -141,11 +141,15 @@ jobs:
             -d CFI_PERMISSIVE \
             -d CFI_CLANG
 
-          # Keep the LineageOS release string (4.9.337-g<12 chars>). Vendor kernel
+          # Keep the LineageOS release string (4.9.337-gdf5cccf77f2). Vendor kernel
           # modules must see the same vermagic, otherwise Wi-Fi and other drivers
-          # do not load. Cut HEAD to exactly 12 characters: --short=12 is only a
-          # minimum, git returns 13 characters in this repository.
-          printf -- '-g%s' "$(git rev-parse HEAD | cut -c1-12)" > .scmversion
+          # do not load. The hash is pinned through CONFIG_LOCALVERSION, because the
+          # .scmversion override is not honoured reliably by scripts/setlocalversion
+          # in this tree (git describe / abbrev length is not reproducible).
+          rm -f .scmversion
+          ./scripts/config --file "arch/${KERNEL_ARCH}/configs/${DEFCONFIG_NAME}" \
+            -d LOCALVERSION_AUTO \
+            -s LOCALVERSION="-gdf5cccf77f2"
 
           # Clang 14+ rejects the illegal IS_ERR()/NULL test in these two files.
           sed -i 's/if (!dpath) {/if (IS_ERR(dpath)) {/' fs/notify/fdinfo.c
@@ -193,7 +197,7 @@ jobs:
 
           echo "kernel release: ${RELEASE:-<not found>}"
           echo "expected      : $EXPECTED_RELEASE"
-          echo ".scmversion   : $(cat .scmversion 2>/dev/null)"
+          echo "localversion  : $(grep -E '^CONFIG_LOCALVERSION' out/.config | tr '\n' ' ')"
           echo "head short12  : $(git rev-parse --short=12 HEAD)"
 
           if [ -z "$RELEASE" ]; then
@@ -204,7 +208,6 @@ jobs:
 
           if [ "$RELEASE" != "$EXPECTED_RELEASE" ]; then
             echo "[-] Release string mismatch. /vendor/lib/modules/wlan.ko would be rejected (vermagic)."
-            echo "[-] The LineageOS kernel branch moved. Pin the commit or set .scmversion to -gdf5cccf77f2."
             exit 1
           fi
 
