@@ -2,7 +2,7 @@
 
 ## Why not SukiSU Nova directly
 
-The Pixel 3 kernel is `4.9.337-gdf5cccf77f2` (read from `boot.img`). Facts from the SukiSU project:
+The Pixel 3 kernel is `4.9.337-gdf5cccf77f2a` (read from `boot.img`; the hash is 13 characters). Facts from the SukiSU project:
 
 - SukiSU Nova (`SukiSU-Nova/SukiSU-Nova`, release v3.0.0, site `sukisu.org`) supports **GKI 2.0 only** for LKM mode. LKM modules ship for `android12-5.10` and newer. There is no 4.9 module, so the Manager "Tap to install" card cannot do anything on this device.
 - Self-built kernels need **kernel 4.14 or newer**. The kernel source has no code path for 4.9.
@@ -32,7 +32,7 @@ Workflow values that matter:
 | `KPM_ENABLE` | `false` | KPM on 4.9 needs an extra `set_memory` backport |
 | `BOOT_SOURCE` | `.../boot/lineage-22.2-blueline-boot.img` | Template for the new boot image |
 
-The workflow keeps the release string `4.9.337-g<kernel-commit>` through `.scmversion`. The vendor kernel modules (`wlan.ko` and others) check `vermagic`, so a changed string breaks Wi-Fi and other drivers.
+The workflow copies the exact release string of the stock boot image (parsed from its `vermagic`) into `CONFIG_LOCALVERSION`. The vendor kernel modules (`wlan.ko`, the audio modules) check `vermagic` and symbol CRCs, so a changed string or a different config shape breaks Wi-Fi and other drivers.
 
 ## Why Wi-Fi and camera keep working
 
@@ -43,12 +43,18 @@ The workflow keeps the release string `4.9.337-g<kernel-commit>` through `.scmve
 
 The build reproduces the ROM kernel ABI in four ways:
 
-1. **Same config shape.** LineageOS builds this device with `build.config.bluecross_no-cfi`, which disables `LTO`, `LTO_CLANG`, `CFI`, `CFI_PERMISSIVE`, `CFI_CLANG`. The workflow applies the same five switches.
-2. **Same release string.** `git rev-parse --short=12 HEAD` of the `lineage-22.2` branch is `df5cccf77f2`, so `.scmversion` produces `4.9.337-gdf5cccf77f2` — the exact string in your current `boot.img`.
+1. **Same config shape.** The released kernel is built with `build.config.bluecross`: `CONFIG_LTO=y`, `CONFIG_LTO_CLANG=y`, `CONFIG_CFI=y`, `CONFIG_CFI_CLANG=y`, `CONFIG_CFI_CLANG_SHADOW=y`, `CONFIG_LD_DEAD_CODE_DATA_ELIMINATION=y`, `CONFIG_THIN_ARCHIVES=y`, with `CONFIG_CFI_PERMISSIVE` off. The workflow enables the same set. LTO and CFI **must** stay on: the stock `wlan.ko` is CFI-instrumented and imports `__cfi_slowpath`, so a non-CFI kernel cannot load it and Wi-Fi dies. `build.config.bluecross_no-cfi` exists in the tree but the shipped image does not use it. The final vmlinux is a full-LTO gold link (`ld.gold` + `LLVMgold.so`), so the workflow adds 16 GB of swap before the build.
+2. **Same release string.** The workflow unpacks the stock `boot.img`, reads its `vermagic`, and copies the release string into `CONFIG_LOCALVERSION`:
+   ```
+   stock vermagic: 4.9.337-gdf5cccf77f2a SMP preempt mod_unload modversions aarch64
+   CONFIG_LOCALVERSION: -gdf5cccf77f2a
+   ```
+   The value is derived from the image, never hardcoded, so it stays correct after a LineageOS OTA. Note the hash has 13 characters: `git rev-parse --short=12` returns 13 in this repository because 12 is ambiguous.
+   `CONFIG_LOCALVERSION_AUTO` is disabled and `.scmversion` is removed, because `scripts/setlocalversion` in this tree also walks nested git repositories (KernelSU, NoMount, patches) and appends their revisions, which overflows the 64-character limit.
 3. **Same symbol CRCs.** `CONFIG_MODVERSIONS=y` is kept, and every change in this build touches `.c` files only (SUSFS patch, syscall hook patch, KernelSU driver). No struct or header change, so CRCs stay identical.
 4. **No module signing.** `CONFIG_MODULE_SIG` is off in the defconfig, so the stock unsigned `wlan.ko` is accepted.
 
-The workflow step **"🧪 Verify module ABI matches the ROM"** fails the build if the release string, `CONFIG_MODVERSIONS`, `CONFIG_SMP`, `CONFIG_PREEMPT`, `CONFIG_MODULE_UNLOAD` or `CONFIG_MODULE_SIG` deviate. A green run means the stock `wlan.ko` loads.
+The workflow step **"🧪 Verify module ABI matches the ROM"** fails the build if the built release string differs from the stock one, if `CONFIG_MODVERSIONS`, `CONFIG_SMP`, `CONFIG_PREEMPT`, `CONFIG_MODULE_UNLOAD` are missing, if `CONFIG_MODULE_SIG` is on, if `CONFIG_KSU` is off, or if the compiled `Image` does not contain the release string. A green run means the stock `wlan.ko` loads.
 
 The shared pack step only accepts `Image`, `Image.gz` or `Image.*-dtb`. This device builds `Image.lz4` with a separate dtb in the boot header, so the workflow packs the image itself: it takes `ramdisk` and `dtb` from the stock template, drops in the new `Image.lz4`, and writes a plain `.img`. Result layout is identical to the LineageOS release image.
 
@@ -146,6 +152,6 @@ If the OTA moves the kernel commit, rebuild from the new branch head so the rele
 | Boots, no Wi-Fi | Stock `wlan.ko` rejected: `vermagic` or CRC mismatch | Check `adb shell dmesg \| grep -i wlan`. Rebuild with the ABI guard step green |
 | Boots, no camera | Camera HAL failed | `adb logcat \| grep -i cameraserver`. Restore the stock boot image and report |
 | "Your device is corrupt" warning | AVB mismatch on boot | `fastboot --disable-verification flash vbmeta vbmeta.img` |
-| Workflow fails at "Verify module ABI" | LineageOS moved the `lineage-22.2` branch head | Pin the kernel commit to `df5cccf77f2a78959014d9b9206241a128691764`, or set `.scmversion` to `-gdf5cccf77f2` |
+| Workflow fails at "Verify module ABI" | The template boot image does not match the ROM anymore (LineageOS OTA), or LTO/CFI got disabled again | Re-extract `boot/lineage-22.2-blueline-boot.img` from the installed OTA; the release string is derived from it automatically. Keep `CONFIG_LTO_CLANG`/`CONFIG_CFI_CLANG` enabled. |
 | Workflow fails in SUSFS patch step | Patch context drift in the LineageOS tree | Read the patch log, or pin an older kernel commit |
 | Link step killed (OOM) | LTO on a 7 GB runner | Already disabled in the workflow; if it still fails, set `FREE_MORE_SPACE: "true"` |

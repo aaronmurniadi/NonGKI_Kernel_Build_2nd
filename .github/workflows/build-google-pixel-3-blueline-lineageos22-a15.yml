@@ -54,9 +54,9 @@ env:
   NEED_DTBO : false
   NEED_SAFE_DTBO : false
 
-  # Empty on purpose: scripts/setlocalversion appends a literal "+" to the release
-  # string when this variable is not set in the environment. An empty value keeps
-  # it set, so the release stays 4.9.337-gdf5cccf77f2 with no suffix.
+  # Kept set but empty on purpose: scripts/setlocalversion appends a literal "+" to
+  # the release string when this variable is not in the environment at all. The real
+  # suffix comes from CONFIG_LOCALVERSION, derived from the stock boot image.
   LOCALVERSION: ""
 
   ROM_TEXT: "lineageos22_2_a15"
@@ -134,17 +134,26 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/device_kernel
 
-          # Match the official build.config.bluecross_no-cfi shape: no Clang LTO,
-          # no CFI. Keeps the link step inside runner memory limits.
+          # Match the shape LineageOS really ships for this device
+          # (build.config.bluecross): Clang LTO and CFI stay ON. The stock kernel in
+          # the OTA has CONFIG_LTO_CLANG=y, CONFIG_CFI_CLANG=y and
+          # CONFIG_CFI_CLANG_SHADOW=y, and the vendor wlan.ko is CFI-instrumented: it
+          # imports __cfi_slowpath. A kernel built without CFI does not export that
+          # symbol, so wlan.ko fails to load and Wi-Fi is gone. build.config.bluecross_no-cfi
+          # exists in the tree but the released image is not built with it.
           # CONFIG_QCA_CLD_WLAN stays a module (m): the stock LineageOS wlan.ko on
-          # the vendor partition keeps loading because the kernel release string
-          # below matches the ROM kernel exactly.
+          # the vendor partition keeps loading because the kernel release string and
+          # the module CRCs below match the ROM kernel exactly.
           ./scripts/config --file "arch/${KERNEL_ARCH}/configs/${DEFCONFIG_NAME}" \
-            -d LTO \
-            -d LTO_CLANG \
-            -d CFI \
+            -d LTO_NONE \
+            -e LTO \
+            -e LTO_CLANG \
+            -e CFI \
+            -e CFI_CLANG \
+            -e CFI_CLANG_SHADOW \
             -d CFI_PERMISSIVE \
-            -d CFI_CLANG
+            -e THIN_ARCHIVES \
+            -e LD_DEAD_CODE_DATA_ELIMINATION
 
           # Keep the exact release string of the stock ROM kernel. The vendor wlan.ko
           # checks vermagic, so a different string drops Wi-Fi. The string is read
@@ -214,13 +223,21 @@ jobs:
       - name: 🛜 Patch Kernel of VPNHide
         uses: ./.github/workflows/patch-vpnhide
 
+      # The final vmlinux is one full-LTO gold link. Give it swap so the runner does
+      # not get OOM-killed while the LLVMgold plugin merges the whole kernel.
+      - name: ❌ Set Swap
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 16
+
       - name: 🚀 Build Process
         uses: ./.github/workflows/build-process
 
-      # Wi-Fi is the only kernel module on this device (wlan.ko, external qcacld driver).
-      # It stays on the vendor partition and loads only if vermagic matches the ROM
-      # kernel exactly. Camera is built in (CONFIG_SPECTRA_CAMERA=y), so it follows
-      # the kernel image. Fail the build instead of shipping an image that drops Wi-Fi.
+      # The vendor partition ships prebuilt modules: wlan.ko (external qcacld driver)
+      # and the audio modules (wcd-core, snd-soc-*). They load only if vermagic and
+      # MODVERSIONS CRCs match the ROM kernel, and wlan.ko is additionally CFI
+      # instrumented. Camera is built in (CONFIG_SPECTRA_CAMERA=y), so it follows the
+      # kernel image. Fail the build instead of shipping an image that drops Wi-Fi.
       - name: 🧪 Verify module ABI matches the ROM
         run: |
           cd $GITHUB_WORKSPACE/device_kernel
@@ -269,14 +286,24 @@ jobs:
             exit 1
           fi
 
-          for OPT in CONFIG_MODVERSIONS=y CONFIG_SMP=y CONFIG_PREEMPT=y CONFIG_MODULE_UNLOAD=y; do
+          for OPT in CONFIG_MODVERSIONS=y CONFIG_SMP=y CONFIG_PREEMPT=y CONFIG_MODULE_UNLOAD=y \
+                     CONFIG_LTO=y CONFIG_LTO_CLANG=y CONFIG_CFI=y CONFIG_CFI_CLANG=y \
+                     CONFIG_CFI_CLANG_SHADOW=y; do
             if grep -qx "$OPT" out/.config; then
               echo "[+] $OPT present."
             else
-              echo "[-] $OPT missing. vermagic would differ from the ROM kernel."
+              echo "[-] $OPT missing. vermagic or CFI ABI would differ from the ROM kernel."
               exit 1
             fi
           done
+
+          # The stock wlan.ko is CFI-instrumented and imports __cfi_slowpath. Without
+          # that export the module is rejected at load time ("Unknown symbol").
+          if ! grep -q "__cfi_slowpath" out/Module.symvers; then
+            echo "[-] __cfi_slowpath is not exported. Stock wlan.ko would not load (no Wi-Fi)."
+            exit 1
+          fi
+          echo "[+] __cfi_slowpath exported; stock wlan.ko can resolve it."
 
           if grep -q '^CONFIG_MODULE_SIG=y' out/.config; then
             echo "[-] CONFIG_MODULE_SIG enabled. Stock wlan.ko has no matching signature."
@@ -329,3 +356,14 @@ jobs:
 
       - name: ✏️ Upload Artifacts
         uses: ./.github/workflows/upload-files
+
+      # The exported symbol CRCs let the vendor modules be checked byte for byte
+      # against the ROM kernel after the fact, without rebuilding.
+      - name: 📤 Upload ABI Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: blueline-abi-abi-files
+          path: |
+            device_kernel/out/Module.symvers
+            device_kernel/out/System.map
+          if-no-files-found: warn
