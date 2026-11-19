@@ -1,0 +1,239 @@
+name: Build Google Pixel 3 (LineageOS 22.2 A15)
+
+# Pixel 3 / Pixel 3 XL (blueline / crosshatch), kernel 4.9.337, non-GKI.
+# Root stack: BakaSU (formerly ReSukiSU, fork of SukiSU-Ultra) + SUSFS.
+# Packing method: MKBOOTIMG, so the result is a flashable boot.img
+# (Pixel 3 has no usable TWRP for Android 15, so an AnyKernel3 zip cannot be flashed).
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  # Device env
+  DEVICE_NAME: "google_pixel_3"
+  DEVICE_CODENAME: "blueline"
+
+  CUSTOM_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu- --eval='export CLANG_FLAGS'"
+  EXTRA_CMDS: "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/clang-custom/lib64"
+
+  KERNEL_SOURCE: "https://github.com/LineageOS/android_kernel_google_msm-4.9.git"
+  KERNEL_BRANCH: "lineage-22.2"
+
+  CLANG_SOURCE: "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git"
+  CLANG_BRANCH: "lineage-20.0"
+
+  GCC_GNU : false
+  GCC_64_SOURCE: "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git"
+  GCC_64_BRANCH: "lineage-19.1"
+  GCC_32_SOURCE: "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git"
+  GCC_32_BRANCH: "lineage-19.1"
+
+  DEFCONFIG_SOURCE: ""
+  DEFCONFIG_NAME: "b1c1_defconfig"
+  DEFCONFIG_ORIGIN_IMAGE: ""
+  DEFCONFIG_FROM_BOOT: false
+
+  KERNELSU_SOURCE : ""
+  KERNELSU_BRANCH : ""
+
+  KERNELSU_AUTO_GET : "true"
+  # sukisu needs kernel 4.14+ and fails on 4.9. bakasu supports kernels from 3.4.
+  KERNELSU_AUTO_FORK : "bakasu"
+
+  SUSFS_ENABLE : true
+  SUSFS_FIXED : true
+
+  AK3_SOURCE : "https://github.com/osm0sis/AnyKernel3.git"
+  AK3_BRANCH : "master"
+
+  # Stock LineageOS boot.img of this device. It is unpacked and used as the template
+  # for the new boot.img (ramdisk + dtb are reused unchanged).
+  BOOT_SOURCE : "https://raw.githubusercontent.com/aaronmurniadi/NonGKI_Kernel_Build_2nd/blueline/boot/lineage-22.2-blueline-boot.img"
+
+  NEED_DTBO : false
+  NEED_SAFE_DTBO : false
+
+  ROM_TEXT: "lineageos22_2_a15"
+
+  # Other env
+  PYTHON_VERSION: "3"
+
+  PACK_METHOD: "MKBOOTIMG"
+  PACK_KMODULES: "false"
+
+  KERNELSU_METHOD: "shell" # shell, manual and only.
+
+  PATCHES_SOURCE: "JackA1ltman/NonGKI_Kernel_Patches"
+  PATCHES_BRANCH: "pixel_kernel"
+
+  SUSFS_FOLDER_FIXED: "pixel_3_series_aosp"
+  SUSFS_PATCH_FIXED: "susfs_fixed"
+
+  REKERNEL_ENABLE: "false"
+  DROIDSPACES_ENABLE: "false"
+  NOMOUNT_ENABLE: "true"
+  FGETPRIORITY_ENABLE: "false"
+  VPNHIDE_ENABLE: "false"
+
+  HOOK_METHOD: "syscall" # Manual hook, required on non-GKI kernels.
+
+  # KPM needs the set_memory backport and CONFIG_KALLSYMS_ALL on 4.9.
+  # Leave it off for the first working boot.
+  KPM_ENABLE: "false"
+  KPM_INLINE: "false"
+  KPM_KPATCH_NEXT: "false"
+  KPM_PATCH_SOURCE: ""
+
+  # Optional: block writes to baseband/EFS/modem partitions.
+  BASEBAND_GUARD_ENABLE: "false"
+  BASEBAND_GUARD_BOOT: "false"
+
+  GENERATE_DTB: "false"
+  GENERATE_CHIP: "google/qcom-base"
+
+  BUILD_DEBUGGER: "false"
+  SKIP_PATCH: "false"
+
+  BUILD_OTHER_CONFIG: "false"
+  MERGE_CONFIG_FILES: ""
+
+  FREE_MORE_SPACE: "false"
+
+jobs:
+  build-kernel:
+    name: Google Pixel 3 (LineageOS 22.2 A15)
+    runs-on: ubuntu-22.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: ⏰ Checkout repository
+        uses: actions/checkout@v6
+
+      - name: ⌛️ Compilation environment preparation
+        uses: ./.github/workflows/build-env
+
+      - name: ⚙️ Get neccssary tools
+        uses: ./.github/workflows/build-ready
+
+      - name: 🪝 Patch Kernel of SUSFS
+        uses: ./.github/workflows/patch-susfs
+
+      - name: 🔗 Patch for no-kprobe
+        uses: ./.github/workflows/patch-no-kprobe
+
+      - name: 🪛 Extra Kernel Options
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+
+          # Match the official build.config.bluecross_no-cfi shape: no Clang LTO,
+          # no CFI. Keeps the link step inside runner memory limits.
+          # CONFIG_QCA_CLD_WLAN stays a module (m): the stock LineageOS wlan.ko on
+          # the vendor partition keeps loading because the kernel release string
+          # below matches the ROM kernel exactly.
+          ./scripts/config --file "arch/${KERNEL_ARCH}/configs/${DEFCONFIG_NAME}" \
+            -d LTO \
+            -d LTO_CLANG \
+            -d CFI \
+            -d CFI_PERMISSIVE \
+            -d CFI_CLANG
+
+          # Keep the LineageOS release string (4.9.337-g<12 chars>). Vendor kernel
+          # modules must see the same vermagic, otherwise Wi-Fi and other drivers
+          # do not load.
+          printf -- '-g%s' "$(git rev-parse --short=12 HEAD)" > .scmversion
+
+          # Clang 14+ rejects the illegal IS_ERR()/NULL test in these two files.
+          sed -i 's/if (!dpath) {/if (IS_ERR(dpath)) {/' fs/notify/fdinfo.c
+          sed -i 's/if (!dpath) {/if (IS_ERR(dpath)) {/' fs/proc/fd.c
+
+      - name: 🧰 Patch Kernel of Re:Kernel
+        uses: ./.github/workflows/patch-rekernel
+
+      - name: 💿 Patch Kernel of Droidspaces
+        uses: ./.github/workflows/patch-droidspaces
+
+      - name: 🔒 Patch Kernel of Baseband Guard
+        uses: ./.github/workflows/patch-baseband-guard
+
+      - name: 🛡️ Patch Kernel of NoMount
+        uses: ./.github/workflows/patch-nomount
+
+      - name: ⛔ Patch Kernel of fgetpriority
+        uses: ./.github/workflows/patch-fgetpriority
+
+      - name: 🛜 Patch Kernel of VPNHide
+        uses: ./.github/workflows/patch-vpnhide
+
+      - name: 🚀 Build Process
+        uses: ./.github/workflows/build-process
+
+      # Wi-Fi is the only kernel module on this device (wlan.ko, external qcacld driver).
+      # It stays on the vendor partition and loads only if vermagic matches the ROM
+      # kernel exactly. Camera is built in (CONFIG_SPECTRA_CAMERA=y), so it follows
+      # the kernel image. Fail the build instead of shipping an image that drops Wi-Fi.
+      - name: 🧪 Verify module ABI matches the ROM
+        run: |
+          cd $GITHUB_WORKSPACE/device_kernel
+
+          EXPECTED_RELEASE="4.9.337-gdf5cccf77f2"
+          RELEASE=$(sed -n 's/^#define UTS_RELEASE "\(.*\)"$/\1/p' include/generated/utsrelease.h)
+
+          echo "kernel release: $RELEASE"
+          echo "expected      : $EXPECTED_RELEASE"
+
+          if [ "$RELEASE" != "$EXPECTED_RELEASE" ]; then
+            echo "[-] Release string mismatch. /vendor/lib/modules/wlan.ko would be rejected (vermagic)."
+            echo "[-] The LineageOS kernel branch moved. Pin the commit or set .scmversion to -gdf5cccf77f2."
+            exit 1
+          fi
+
+          for OPT in CONFIG_MODVERSIONS=y CONFIG_SMP=y CONFIG_PREEMPT=y CONFIG_MODULE_UNLOAD=y; do
+            if grep -qx "$OPT" out/.config; then
+              echo "[+] $OPT present."
+            else
+              echo "[-] $OPT missing. vermagic would differ from the ROM kernel."
+              exit 1
+            fi
+          done
+
+          if grep -q '^CONFIG_MODULE_SIG=y' out/.config; then
+            echo "[-] CONFIG_MODULE_SIG enabled. Stock wlan.ko has no matching signature."
+            exit 1
+          fi
+
+          echo "[+] Module ABI check passed."
+
+      # The shared pack-process action only looks for Image / Image.gz / Image.*-dtb.
+      # LineageOS builds this device as BOARD_KERNEL_IMAGE_NAME := Image.lz4 with
+      # BOARD_INCLUDE_DTB_IN_BOOTIMG := true, so the image is packed here to keep the
+      # exact stock layout: lz4 kernel + ramdisk + stock dtb from the template.
+      - name: 🔩 Pack boot.img
+        run: |
+          cd $GITHUB_WORKSPACE
+
+          IMAGE_DIR="device_kernel/out/arch/${KERNEL_ARCH}/boot"
+          TIME=$(date +"%Y%m%d%H%M%S")
+          TEMPLATE="boot_source_${DEVICE_NAME}.img"
+
+          FORMAT_MKBOOTING=$(python3 mkboottools/unpack_bootimg.py --boot_img="$TEMPLATE" --format mkbootimg)
+          test -n "$FORMAT_MKBOOTING" || { echo "[-] Could not read boot image format."; exit 1; }
+
+          # Writes out/kernel, out/ramdisk and out/dtb from the stock image.
+          python3 mkboottools/unpack_bootimg.py --boot_img="$TEMPLATE"
+
+          test -f "$IMAGE_DIR/Image.lz4" || { echo "[-] Image.lz4 not found."; exit 1; }
+          cp -f "$IMAGE_DIR/Image.lz4" out/kernel
+
+          eval "python3 mkboottools/mkbootimg.py $FORMAT_MKBOOTING -o $DEVICE_CODENAME-$ROM_TEXT-$TIME-image.img"
+
+          ls -l "$DEVICE_CODENAME-$ROM_TEXT-$TIME-image.img"
+          python3 mkboottools/unpack_bootimg.py --boot_img="$DEVICE_CODENAME-$ROM_TEXT-$TIME-image.img"
+
+          echo "PACK_NAME=$DEVICE_CODENAME-$ROM_TEXT-$TIME-image.img" >> $GITHUB_ENV
+
+      - name: ✏️ Upload Artifacts
+        uses: ./.github/workflows/upload-files
