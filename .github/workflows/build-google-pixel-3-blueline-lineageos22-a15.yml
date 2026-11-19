@@ -180,10 +180,26 @@ jobs:
           cd $GITHUB_WORKSPACE/device_kernel
 
           EXPECTED_RELEASE="4.9.337-gdf5cccf77f2"
-          RELEASE=$(sed -n 's/^#define UTS_RELEASE "\(.*\)"$/\1/p' include/generated/utsrelease.h)
 
-          echo "kernel release: $RELEASE"
+          # The kernel is built out of tree (O=out), so all generated headers live
+          # under out/. include/config/kernel.release holds the full release string.
+          RELEASE=""
+          if [ -f out/include/config/kernel.release ]; then
+            RELEASE=$(cat out/include/config/kernel.release)
+          elif [ -f out/include/generated/utsrelease.h ]; then
+            RELEASE=$(sed -n 's/^#define UTS_RELEASE "\(.*\)"$/\1/p' out/include/generated/utsrelease.h)
+          fi
+
+          echo "kernel release: ${RELEASE:-<not found>}"
           echo "expected      : $EXPECTED_RELEASE"
+          echo ".scmversion   : $(cat .scmversion 2>/dev/null)"
+          echo "head short12  : $(git rev-parse --short=12 HEAD)"
+
+          if [ -z "$RELEASE" ]; then
+            echo "[-] Could not read the kernel release string."
+            ls -l out/include/config/kernel.release out/include/generated/utsrelease.h 2>&1
+            exit 1
+          fi
 
           if [ "$RELEASE" != "$EXPECTED_RELEASE" ]; then
             echo "[-] Release string mismatch. /vendor/lib/modules/wlan.ko would be rejected (vermagic)."
@@ -202,6 +218,20 @@ jobs:
 
           if grep -q '^CONFIG_MODULE_SIG=y' out/.config; then
             echo "[-] CONFIG_MODULE_SIG enabled. Stock wlan.ko has no matching signature."
+            exit 1
+          fi
+
+          # KernelSU must be compiled into the image, not just enabled in .config.
+          if ! grep -q '^CONFIG_KSU=y' out/.config; then
+            echo "[-] CONFIG_KSU not enabled. The build would not provide root."
+            exit 1
+          fi
+
+          # Final proof: the compiled binary contains the ROM release string.
+          if strings -a out/arch/arm64/boot/Image | grep -qF "$EXPECTED_RELEASE"; then
+            echo "[+] Image contains $EXPECTED_RELEASE (vermagic matches the ROM)."
+          else
+            echo "[-] Image does not contain $EXPECTED_RELEASE. wlan.ko would be rejected."
             exit 1
           fi
 
