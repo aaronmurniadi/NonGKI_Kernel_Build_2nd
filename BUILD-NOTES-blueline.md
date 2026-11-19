@@ -80,9 +80,13 @@ If you rename the fork, the branch, or the image path, update `BOOT_SOURCE` in t
 
 ### 3. Disable the weekly mass build
 
-`build-release.yml` runs every Wednesday and builds all 19 devices. In the fork, disable it: Actions → "Build and Release Kernel" → "…" → Disable workflow. Run only the blueline workflow.
+Done already. `build-release.yml` (Wednesday schedule, all 19 devices) and `build-kernel.yml` (matrix) are disabled in the fork. Only the blueline workflow stays active.
 
 ### 4. Run the workflow
+
+A run is already started on branch `blueline`:
+
+https://github.com/aaronmurniadi/NonGKI_Kernel_Build_2nd/actions/runs/44588245749
 
 Actions → "Build Google Pixel 3 (LineageOS 22.2 A15)" → Run workflow → branch `blueline`.
 
