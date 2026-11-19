@@ -54,6 +54,11 @@ env:
   NEED_DTBO : false
   NEED_SAFE_DTBO : false
 
+  # Empty on purpose: scripts/setlocalversion appends a literal "+" to the release
+  # string when this variable is not set in the environment. An empty value keeps
+  # it set, so the release stays 4.9.337-gdf5cccf77f2 with no suffix.
+  LOCALVERSION: ""
+
   ROM_TEXT: "lineageos22_2_a15"
 
   # Other env
@@ -145,11 +150,11 @@ jobs:
           # modules must see the same vermagic, otherwise Wi-Fi and other drivers
           # do not load. The hash is pinned through CONFIG_LOCALVERSION, because the
           # .scmversion override is not honoured reliably by scripts/setlocalversion
-          # in this tree (git describe / abbrev length is not reproducible).
+          # in this tree.
           rm -f .scmversion
           ./scripts/config --file "arch/${KERNEL_ARCH}/configs/${DEFCONFIG_NAME}" \
-            -d LOCALVERSION_AUTO \
-            -s LOCALVERSION="-gdf5cccf77f2"
+            --undefine LOCALVERSION_AUTO \
+            --set-str LOCALVERSION "-gdf5cccf77f2"
 
           # Clang 14+ rejects the illegal IS_ERR()/NULL test in these two files.
           sed -i 's/if (!dpath) {/if (IS_ERR(dpath)) {/' fs/notify/fdinfo.c
