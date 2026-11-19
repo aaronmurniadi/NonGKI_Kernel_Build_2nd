@@ -153,7 +153,7 @@ jobs:
           # in this tree.
           rm -f .scmversion
           ./scripts/config --file "arch/${KERNEL_ARCH}/configs/${DEFCONFIG_NAME}" \
-            --undefine LOCALVERSION_AUTO \
+            -d LOCALVERSION_AUTO \
             --set-str LOCALVERSION "-gdf5cccf77f2"
 
           # Clang 14+ rejects the illegal IS_ERR()/NULL test in these two files.
